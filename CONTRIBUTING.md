@@ -1,5 +1,9 @@
+# CONTRIBUTING
 
 ## Setup
+
+### Install from source
+
 
 ### Install pre-commit hooks
 
@@ -10,5 +14,3 @@
 2. [Install the git hook scripts](https://pre-commit.com/#3-install-the-git-hook-scripts)
 
         pre-commit install
-
-

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+test_dir="/tmp/pile-tests"
+
+origin_dir="$test_dir/origin.git"
+repo_dir="$test_dir/working-repo"
+other_dir="$test_dir/other-repo"
+
+function clean_directories() {
+    git -C "$repo_dir" pilereset
+    git -C "$repo_dir" pilereset
+    /usr/bin/env rm -rf "$test_dir"
+    mkdir -p "$origin_dir"
+    mkdir "$repo_dir"
+    mkdir "$other_dir"
+
+    git init --bare "$origin_dir"
+    git clone "$origin_dir" "$repo_dir"
+    git -C "$repo_dir" config pile.cleanupRemoteOnSubmitFailure false
+    git -C "$repo_dir" checkout -b main
+    git -C "$repo_dir" commit --allow-empty -m 'initial commit'
+    git -C "$repo_dir" push origin main
+    git clone "$origin_dir" "$other_dir"
+    git -C "$origin_dir" config pile.cleanupRemoteOnSubmitFailure false
+}
+
+function create_pr() {
+    number="${1:-"1"}"
+    echo "change $number" > "$repo_dir/file.txt"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -m "message $number"
+    git -C "$repo_dir" submitpr || true
+}
+
+function add_local_commit() {
+    number="${1:-"1"}"
+    echo "change $number" > "$repo_dir/file.txt"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -m "message $number"
+    git -C "$repo_dir" push origin main
+}
+
+function add_branch() {
+    number="${1:-"1"}"
+    echo "change $number" > "$repo_dir/file.txt"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -m "message $number"
+    git -C "$repo_dir" submitpr
+}
+
+function add_remote_commit_to_branch() {
+    number="${1:-"1"}"
+    git -C "$other_dir" fetch
+    git -C "$other_dir" switch "message-$number"
+    echo "change $2" >> "$other_dir/file.txt"
+    git -C "$other_dir" add -A
+    git -C "$other_dir" commit -m "message $2"
+    git -C "$other_dir" push
+}
+
+function add_remote_branch() {
+    number="${1:-"1"}"
+    echo "change $number" > "$other_dir/file.txt"
+    git -C "$other_dir" add -A
+    git -C "$other_dir" commit -m "message $number"
+    git -C "$other_dir" submitpr
+}
+
+# should always: squash new changes into pile commit
+
+# Test: remote has new changes that can be fastforwarded
+# Should: rebase local on main
+clean_directories
+add_branch 1
+add_remote_commit_to_branch 1 2
+#git -C "$repo_dir" pullpr
+#git -C "$repo_dir" log --oneline | grep "message 1"
+#git -C "$repo_dir" diff HEAD~ | grep "change 1"
+
+
+# Test: remote has new changes; local has new changes that can be rebased
+# Should: rebase local on main
+
+# Test: remote has new changes; local has new changes that cause a merge conflict
+# Should: open mergetool
+
+# Test: remote has branch; local does not
+# not implemented
+
+
+# Test: remote does not have branch
+# Should: error

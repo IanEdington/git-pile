@@ -1,24 +1,47 @@
 #!/usr/bin/env python3
+import os
+# given either the local_main_commit_hash or the pr_number
+# find the remote branch
+# pull it
+# if the local branch exists and there are additional commits
+#   ask if we should rebase or blow away local
+#   - attempt to rebase off remote
+#       if it fails - use mergetool
+# squash branch into head commit
+# if the local main commit exists
+# - replace it with the squashed commit
+# - otherwise add the commit to the top of the local main stack
+
+# TODO: how do we handle $GIT_PILE_PREFIX?
 
 from typing import List, Dict, Tuple
 import argparse
 import collections
-import os
 import subprocess
 import sys
+import signal
 
 
 class _GitError(Exception):
     pass
 
 
+def signal_handler(sig, frame):
+    worktree_dir = _run_git_command(["pileworktreepath"])
+    _run_git_command(["-C", worktree_dir, "switch --detach --quiet"])
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, signal_handler)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--squash",
-        action="store_true",
-        help="Squash the commit instead of adding a new commit to the branch",
-    )
+    # parser.add_argument(
+    #     "--squash",
+    #     action="store_true",
+    #     help="Squash the commit instead of adding a new commit to the branch"
+    # )
     return parser
 
 
@@ -42,131 +65,73 @@ def _is_in_repo() -> bool:
         return False
 
 
-def _get_staged_files() -> List[str]:
-    statuses = _run_git_command(
-        ["diff", "--cached", "--name-status"]
-    ).splitlines()
-    files = []
-    for status in statuses:
-        # Modified files are formatted as M<tab>filepath
-        # Renamed files are formatted as R%<tab>old path<tab>new path
-        files.extend(status.split("\t")[1:])
-
-    return files
+def _switch_to_branch_in_worktree(local_branch_name: str, worktree_dir: str) -> None:
+    # check if directory exists
+    if not os.path.exists(worktree_dir):
+        _run_git_command(["worktree", "add", "--quiet", "--force", worktree_dir, local_branch_name])
+    else:
+        _run_git_command(["-C", worktree_dir, "switch", "--quiet", local_branch_name])
 
 
-def _get_modified_files() -> List[str]:
-    return _run_git_command(["diff", "--name-only"]).splitlines()
-
-
-def _get_possible_shas() -> List[str]:
-    return _run_git_command(
-        ["log", "--pretty=%H", "@{upstream}..HEAD"]
-    ).splitlines()
-
-
-def _get_changed_files() -> Tuple[List[str], bool]:
-    staged_files = _get_staged_files()
-    if staged_files:
-        return (staged_files, False)
-
-    modified_files = _get_modified_files()
-    if modified_files:
-        return (modified_files, True)
-
-    return ([], False)
-
-
-def _files_for_sha(sha: str) -> List[str]:
-    return _run_git_command(
-        ["show", "--name-only", "--pretty=", sha]
-    ).splitlines()
-
-
-def _shas_by_file(
-    shas: List[str], changed_files: List[str]
-) -> Dict[str, List[str]]:
-    shas_by_file: Dict[str, List[str]] = collections.defaultdict(list)
-    for sha in shas:
-        for filepath in _files_for_sha(sha):
-            if filepath in changed_files:
-                shas_by_file[filepath].append(sha)
-
-    return shas_by_file
-
-
-def _main(squash: bool, commit_args: List[str]) -> None:
+def _main(commit_args: List[str]) -> None:
     if not _is_in_repo():
         sys.exit("error: not in git repo")
 
-    possible_shas = _get_possible_shas()
-    if not possible_shas:
-        sys.exit("error: no commits ahead of upstream")
+    commit = _run_git_command(["rev-parse", commit_args[0] if commit_args else "HEAD"])
+    local_pile_branch = _run_git_command(["symbolic-ref", "HEAD"])
+    remote_pile_branch = _run_git_command(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    remote_pile_branch_remote = remote_pile_branch.split("/")[0]
+    remote_pile_branch_name = "/".join(remote_pile_branch.split("/")[1:])
+    pile_merge_base = _run_git_command(["merge-base", "@{upstream}", local_pile_branch])
+    commits_on_the_pile = [s.strip('"') for s in
+                           _run_git_command(["log", "--pretty=format:\"%H\"", f"{pile_merge_base}..HEAD"]).splitlines()]
 
-    changed_files, stage_first = _get_changed_files()
-    if not changed_files:
-        sys.exit("error: no changed files")
+    if commit not in commits_on_the_pile:
+        sys.exit("error: commit is not on the pile")
+        # TODO fetch PR using gh
+        # get remote branch name
+        # ("gh pr view 1 --json headRefName --jq .headRefName")
 
-    shas_by_file = _shas_by_file(possible_shas, changed_files)
-    matching_shas = set(
-        sum(
-            (
-                shas_by_file[filepath]
-                for filepath in changed_files
-                if filepath in shas_by_file
-            ),
-            [],
-        )
-    )
+    local_branch_name = _run_git_command(["pilebranchname", commit])
+    worktree_dir = _run_git_command(["pileworktreepath"])
+    _switch_to_branch_in_worktree(local_branch_name, worktree_dir)
+    remote_branch = _run_git_command(
+        ["-C", worktree_dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    remote_branch_remote = remote_branch.split("/")[0]
+    remote_branch_name = "/".join(remote_branch.split("/")[1:])
+    # fetch branch
+    _run_git_command(
+        ["-C", worktree_dir, "fetch", "--quiet", remote_branch_remote, remote_branch_name, remote_pile_branch_name])
+    # if local branch exists rebase onto remote TODO: optionally blow away local changes
+    _run_git_command(["-C", worktree_dir, "rebase", "--quiet", remote_branch])
 
-    if not matching_shas:
-        sys.exit(
-            "error: no commits changed: {}".format(", ".join(changed_files))
-        )
-    elif len(matching_shas) > 1:
-        option_lines = []
-        print(
-            "Which commit would you like to add your changes to? (ctrl-c to cancel)"
-        )
-        # TODO: Put shas in committed date order?
-        for sha in matching_shas:
-            output = subprocess.check_output(
-                ["git", "log", "--oneline", "-1", sha]
-            ).decode()
-            option_lines.append(output)
+    # squash branch into pile
+    # squash into a single commit
+    # Perform the rebase with squashing without an interactive editor
+    merge_base = _run_git_command(["merge-base", remote_branch, remote_pile_branch])
+    os.environ["GIT_SEQUENCE_EDITOR"] = "sed -i -e '1,1!s/pick/fixup/'"
+    os.environ["GIT_EDITOR"] = ":"
+    _run_git_command(["-C", worktree_dir, "rebase", "--quiet", merge_base])
 
-        try:
-            selected_line = subprocess.check_output(
-                ["fzy"], input="\n".join(sorted(option_lines)).encode()
-            ).decode()
-        except subprocess.CalledProcessError:
-            sys.exit(1)
+    # checkout commit
+    # make temporary branch
+    # cherry-pick merge_base..old_commit^
+    # cherry-pick new_commit
+    # cherry-pick old_commit..HEAD
+    # _run_git_command(["-C", worktree_dir, "switch --detach --quiet $(git rev-parse --short HEAD)"])
+    # _run_git_command(["-C", worktree_dir, "reset --soft", base_commit])
+    # squash branch into head commit
+    # _run_git_command(["add"] + changed_files)
+    # code = subprocess.Popen(["git", "commit", "--quiet"] + args).wait()
+    # if code != 0:
+    #     raise SystemExit("error: failed to commit, not updating PR")
 
-        selected_sha = selected_line.split(" ")[0]
-    else:
-        selected_sha = matching_shas.pop()
-
-    if stage_first:
-        _run_git_command(["add"] + changed_files)
-
-    args = commit_args
-    if squash:
-        args.extend(["-m 'ignore, will be squashed'", "-s"])
-
-    code = subprocess.Popen(["git", "commit", "--quiet"] + args).wait()
-    if code != 0:
-        raise SystemExit("error: failed to commit, not updating PR")
-
-    update_command = ["git", "updatepr", selected_sha]
-    if squash:
-        update_command.append("--squash")
-
-    try:
-        subprocess.check_call(update_command)
-    except subprocess.CalledProcessError:
-        sys.exit(1)
+    # try:
+    #     subprocess.check_call(update_command)
+    # except subprocess.CalledProcessError:
+    #     sys.exit(1)
 
 
 if __name__ == "__main__":
     args, commit_args = _build_parser().parse_known_args()
-    _main(args.squash, commit_args)
+    _main(commit_args)

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+
+
+# Find the divergence point
+commit_sha=$(git merge-base origin/main HEAD )
+
+# Perform the rebase with squashing without an interactive editor
+GIT_SEQUENCE_EDITOR="sed -i -e '1,1!s/pick/fixup/'" GIT_EDITOR=":" git rebase -i "${commit_sha}"
+
+# Edit commit message if needed using a script or a tool of your choice
+# Example using sed to edit the commit message
+#git commit --amend -m "$(git log --format=%B --reverse HEAD..HEAD~2 | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/; /g')"

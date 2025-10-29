@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ -n "${GIT_PILE_VERBOSE:-}" ]]; then
+  set -x
+fi
+
+git fetch --prune
+git rebase origin/$(git config user.main-branch)
+branches=$(git branch -vv | grep ': gone]' | grep -v '^*' | awk '{ print $1 }' || true)
+if [[ -n "$branches" ]]; then
+ echo "$branches" | xargs -n 1 git branch -D --
+fi
